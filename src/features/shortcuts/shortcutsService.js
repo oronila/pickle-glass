@@ -10,15 +10,30 @@ class ShortcutsService {
         this.mouseEventsIgnored = false;
         this.windowPool = null;
         this.allWindowVisibility = true;
+        this.recentFeaturePanels = [];
     }
 
     initialize(windowPool) {
         this.windowPool = windowPool;
+        internalBridge.on('window:featurePanelActivated', ({ name }) => {
+            if (!['ask', 'listen'].includes(name)) return;
+            this.recentFeaturePanels = [name, ...this.recentFeaturePanels.filter(panel => panel !== name)];
+        });
         internalBridge.on('reregister-shortcuts', () => {
             console.log('[ShortcutsService] Reregistering shortcuts due to header state change.');
             this.registerShortcuts();
         });
         console.log('[ShortcutsService] Initialized with dependencies and event listener.');
+    }
+
+    scrollResponse(direction) {
+        const panels = ['ask', 'listen'].filter(name => {
+            const win = this.windowPool?.get(name);
+            return win && !win.isDestroyed() && win.isVisible() && !win.isMinimized?.();
+        });
+        const focused = panels.find(name => this.windowPool.get(name).isFocused?.());
+        const target = focused || this.recentFeaturePanels.find(name => panels.includes(name)) || panels[0];
+        if (target) this.windowPool.get(target).webContents.send(`scroll-response-${direction}`);
     }
 
     async openShortcutSettingsWindow () {
@@ -66,6 +81,8 @@ class ShortcutsService {
             toggleVisibility: isMac ? 'Cmd+\\' : 'Ctrl+\\',
             toggleClickThrough: isMac ? 'Cmd+M' : 'Ctrl+M',
             nextStep: isMac ? 'Cmd+Enter' : 'Ctrl+Enter',
+            toggleListen: isMac ? 'Cmd+Shift+L' : 'Ctrl+Shift+L',
+            toggleInsights: isMac ? 'Cmd+Shift+I' : 'Ctrl+Shift+I',
             manualScreenshot: isMac ? 'Cmd+Shift+S' : 'Ctrl+Shift+S',
             previousResponse: isMac ? 'Cmd+[' : 'Ctrl+[',
             nextResponse: isMac ? 'Cmd+]' : 'Ctrl+]',
@@ -92,7 +109,7 @@ class ShortcutsService {
         const defaults = this.getDefaultKeybinds();
         let needsUpdate = false;
         for (const action in defaults) {
-            if (!keybinds[action]) {
+            if (!Object.prototype.hasOwnProperty.call(keybinds, action)) {
                 keybinds[action] = defaults[action];
                 needsUpdate = true;
             }
@@ -164,7 +181,10 @@ class ShortcutsService {
             if (keybinds.toggleVisibility) {
                 globalShortcut.register(keybinds.toggleVisibility, () => this.toggleAllWindowsVisibility());
             }
-            console.log('[Shortcuts] registerOnlyToggleVisibility, only toggleVisibility shortcut is registered.');
+            if (keybinds.manualScreenshot && header?.currentHeaderState !== 'apikey') {
+                this.registerScreenshotShortcut(keybinds.manualScreenshot);
+            }
+            console.log('[Shortcuts] Hidden mode: visibility and screenshot shortcuts registered.');
             return;
         }
 
@@ -210,24 +230,30 @@ class ShortcutsService {
                 case 'toggleVisibility':
                     callback = () => this.toggleAllWindowsVisibility();
                     break;
+                case 'toggleListen':
+                    callback = () => {
+                        const headerWindow = this.windowPool.get('header');
+                        if (headerWindow && !headerWindow.isDestroyed()) {
+                            headerWindow.webContents.send('shortcut:listen');
+                        }
+                    };
+                    break;
+                case 'toggleInsights':
+                    callback = () => {
+                        const headerWindow = this.windowPool.get('header');
+                        if (headerWindow && !headerWindow.isDestroyed()) {
+                            headerWindow.webContents.send('shortcut:insights');
+                        }
+                    };
+                    break;
                 case 'nextStep':
                     callback = () => askService.toggleAskButton(true);
                     break;
                 case 'scrollUp':
-                    callback = () => {
-                        const askWindow = this.windowPool.get('ask');
-                        if (askWindow && !askWindow.isDestroyed() && askWindow.isVisible()) {
-                            askWindow.webContents.send('scroll-response-up');
-                        }
-                    };
+                    callback = () => this.scrollResponse('up');
                     break;
                 case 'scrollDown':
-                    callback = () => {
-                        const askWindow = this.windowPool.get('ask');
-                        if (askWindow && !askWindow.isDestroyed() && askWindow.isVisible()) {
-                            askWindow.webContents.send('scroll-response-down');
-                        }
-                    };
+                    callback = () => this.scrollResponse('down');
                     break;
                 case 'moveUp':
                     callback = () => { if (header && header.isVisible()) internalBridge.emit('window:moveStep', { direction: 'up' }); };
@@ -251,29 +277,37 @@ class ShortcutsService {
                      };
                      break;
                 case 'manualScreenshot':
-                    callback = () => {
-                        if(mainWindow && !mainWindow.isDestroyed()) {
-                             mainWindow.webContents.executeJavaScript('window.captureManualScreenshot && window.captureManualScreenshot();');
-                        }
-                    };
+                    callback = () => { askService.captureAttachment().catch(error => console.error('[Screenshot]', error)); };
                     break;
                 case 'previousResponse':
-                    callback = () => sendToRenderer('navigate-previous-response');
+                    callback = () => sendToRenderer('ask:navigateResponse', -1);
                     break;
                 case 'nextResponse':
-                    callback = () => sendToRenderer('navigate-next-response');
+                    callback = () => sendToRenderer('ask:navigateResponse', 1);
                     break;
             }
             
             if (callback) {
                 try {
-                    globalShortcut.register(accelerator, callback);
+                    const registered = globalShortcut.register(accelerator, callback);
+                    if (!registered && action === 'manualScreenshot') {
+                        askService.state.attachmentError = `Screenshot shortcut ${accelerator} is unavailable. Change it in Settings.`;
+                        askService._broadcastState();
+                    }
                 } catch(e) {
                     console.error(`[Shortcuts] Failed to register shortcut for "${action}" (${accelerator}):`, e.message);
                 }
             }
         }
         console.log('[Shortcuts] All shortcuts have been registered.');
+    }
+
+    registerScreenshotShortcut(accelerator) {
+        const registered = globalShortcut.register(accelerator, () => askService.captureAttachment().catch(console.error));
+        if (!registered) {
+            askService.state.attachmentError = `Screenshot shortcut ${accelerator} is unavailable. Change it in Settings.`;
+            askService._broadcastState();
+        }
     }
 
     unregisterAll() {

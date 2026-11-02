@@ -1,12 +1,19 @@
 import { html, css, LitElement } from '../../assets/lit-core-2.7.4.min.js';
+import '../../common/ResponseFontControls.js';
+
+import '../../common/ConversationFeed.js';
 
 export class SummaryView extends LitElement {
     static styles = css`
         :host {
-            display: block;
+            display: flex;
+            flex-direction:column;
+            min-height:0;
             width: 100%;
         }
 
+        conversation-feed { flex:1; min-height:0; }
+        .text-size-toolbar { flex-shrink:0; }
         /* Inherit font styles from parent */
 
         /* highlight.js 스타일 추가 */
@@ -24,7 +31,7 @@ export class SummaryView extends LitElement {
 
         .insights-container code {
             font-family: 'Monaco', 'Menlo', 'Consolas', monospace !important;
-            font-size: 11px !important;
+            font-size: calc(11px * var(--ai-response-scale, 1)) !important;
             background: transparent !important;
             white-space: pre !important;
             word-wrap: normal !important;
@@ -81,10 +88,15 @@ export class SummaryView extends LitElement {
             padding: 12px 16px 16px 16px;
             position: relative;
             z-index: 1;
-            min-height: 150px;
-            max-height: 600px;
+            box-sizing: border-box;
+            height: 100%;
+            min-height: 0;
+            max-height: 100%;
+            overscroll-behavior: contain;
             flex: 1;
         }
+
+        .text-size-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 
         /* Visibility handled by parent component */
 
@@ -105,7 +117,7 @@ export class SummaryView extends LitElement {
 
         insights-title {
             color: rgba(255, 255, 255, 0.8);
-            font-size: 15px;
+            font-size: calc(15px * var(--ai-response-scale, 1));
             font-weight: 500;
             font-family: 'Helvetica Neue', sans-serif;
             margin: 12px 0 8px 0;
@@ -114,7 +126,7 @@ export class SummaryView extends LitElement {
 
         .insights-container h4 {
             color: #ffffff;
-            font-size: 12px;
+            font-size: calc(12px * var(--ai-response-scale, 1));
             font-weight: 600;
             margin: 12px 0 8px 0;
             padding: 4px 8px;
@@ -133,7 +145,7 @@ export class SummaryView extends LitElement {
 
         .outline-item {
             color: #ffffff;
-            font-size: 11px;
+            font-size: calc(11px * var(--ai-response-scale, 1));
             line-height: 1.4;
             margin: 4px 0;
             padding: 6px 8px;
@@ -150,7 +162,7 @@ export class SummaryView extends LitElement {
 
         .request-item {
             color: #ffffff;
-            font-size: 12px;
+            font-size: calc(12px * var(--ai-response-scale, 1));
             line-height: 1.2;
             margin: 4px 0;
             padding: 6px 8px;
@@ -173,7 +185,7 @@ export class SummaryView extends LitElement {
         /* 마크다운 렌더링된 콘텐츠 스타일 */
         .markdown-content {
             color: #ffffff;
-            font-size: 11px;
+            font-size: calc(11px * var(--ai-response-scale, 1));
             line-height: 1.4;
             margin: 4px 0;
             padding: 6px 8px;
@@ -228,13 +240,16 @@ export class SummaryView extends LitElement {
             justify-content: center;
             height: 100px;
             color: rgba(255, 255, 255, 0.6);
-            font-size: 12px;
+            font-size: calc(12px * var(--ai-response-scale, 1));
             font-style: italic;
         }
     `;
 
     static properties = {
+        feedPage: {type:Object},
         structuredData: { type: Object },
+        sessionId: { type: String },
+        requestError: { type: String, state: true },
         isVisible: { type: Boolean },
         hasCompletedRecording: { type: Boolean },
     };
@@ -247,6 +262,9 @@ export class SummaryView extends LitElement {
             actions: [],
             followUps: [],
         };
+        this.feedEpoch=0;
+        this.sessionId = null;
+        this.requestError = '';
         this.isVisible = true;
         this.hasCompletedRecording = false;
 
@@ -263,22 +281,33 @@ export class SummaryView extends LitElement {
     connectedCallback() {
         super.connectedCallback();
         if (window.api) {
-            window.api.summaryView.onSummaryUpdate((event, data) => {
+            this.feedListener = (event,page) => { this.feedPage=page; this.structuredData=page.entries?.at(-1)?.data || this.structuredData; };
+            window.api.summaryView.onFeed(this.feedListener);
+            this.reloadFeed();
+            this._summaryListener = (event, data) => {
+                if (data.sessionId !== this.sessionId) return;
                 this.structuredData = data;
                 this.requestUpdate();
-            });
+            };
+            window.api.summaryView.onSummaryUpdate(this._summaryListener);
         }
     }
 
     disconnectedCallback() {
         super.disconnectedCallback();
+        this.feedEpoch++;
         if (window.api) {
-            window.api.summaryView.removeAllSummaryUpdateListeners();
+            window.api.summaryView.removeOnSummaryUpdate(this._summaryListener);
+            if(this.feedListener) window.api.summaryView.removeOnFeed(this.feedListener);
         }
     }
 
     // Handle session reset from parent
-    resetAnalysis() {
+    resetAnalysis({reload=true}={}) {
+        this.feedEpoch++;
+        this.requestError = '';
+        this.feedPage={entries:[],sessionId:null,reset:true};
+        if(reload)this.reloadFeed();
         this.structuredData = {
             summary: [],
             topic: { header: '', bullets: [] },
@@ -288,18 +317,26 @@ export class SummaryView extends LitElement {
         this.requestUpdate();
     }
 
+    async reloadFeed() {
+        const epoch=this.feedEpoch;
+        try {
+            const page=await window.api?.summaryView.getFeed();
+            if(page&&epoch===this.feedEpoch){this.feedPage={...page,reset:true};this.structuredData=page.entries?.at(-1)?.data || this.structuredData;}
+        } catch(error){if(epoch===this.feedEpoch)this.requestError=error.message;}
+    }
+
     async loadLibraries() {
         try {
             if (!window.marked) {
-                await this.loadScript('../../../assets/marked-4.3.0.min.js');
+                await this.loadScript('../assets/marked-4.3.0.min.js');
             }
 
             if (!window.hljs) {
-                await this.loadScript('../../../assets/highlight-11.9.0.min.js');
+                await this.loadScript('../assets/highlight-11.9.0.min.js');
             }
 
             if (!window.DOMPurify) {
-                await this.loadScript('../../../assets/dompurify-3.0.7.min.js');
+                await this.loadScript('../assets/dompurify-3.0.7.min.js');
             }
 
             this.marked = window.marked;
@@ -336,6 +373,7 @@ export class SummaryView extends LitElement {
 
             if (this.DOMPurify) {
                 this.isDOMPurifyLoaded = true;
+            window.dispatchEvent(new Event('ai-markdown-ready'));
                 console.log('DOMPurify loaded successfully in SummaryView');
             }
         } catch (error) {
@@ -403,26 +441,29 @@ export class SummaryView extends LitElement {
         });
     }
 
-    async handleRequestClick(requestText) {
+    async handleRequestClick(requestText, originSessionId = this.sessionId) {
         console.log('🔥 Analysis request clicked:', requestText);
 
         if (window.api) {
+            this.requestError = '';
             try {
-                const result = await window.api.summaryView.sendQuestionFromSummary(requestText);
+                const result = await window.api.summaryView.sendQuestionFromSummary(requestText, originSessionId);
 
                 if (result.success) {
                     console.log('✅ Question sent to AskView successfully');
                 } else {
+                    this.requestError = result.error;
                     console.error('❌ Failed to send question to AskView:', result.error);
                 }
             } catch (error) {
+                this.requestError = error.message;
                 console.error('❌ Error in handleRequestClick:', error);
             }
         }
     }
 
     getSummaryText() {
-        const data = this.structuredData || { summary: [], topic: { header: '', bullets: [] }, actions: [] };
+        const data = this.shadowRoot?.querySelector('conversation-feed')?.entries?.at(-1)?.data || this.structuredData || { summary: [], topic: { header: '', bullets: [] }, actions: [] };
         let sections = [];
 
         if (data.summary && data.summary.length > 0) {
@@ -446,103 +487,17 @@ export class SummaryView extends LitElement {
 
     updated(changedProperties) {
         super.updated(changedProperties);
+        if (changedProperties.has('sessionId') && this.requestError) this.requestError = '';
         this.renderMarkdownContent();
+        this.dispatchEvent(new CustomEvent('insights-content-resized', { bubbles: true, composed: true }));
     }
 
     render() {
-        if (!this.isVisible) {
-            return html`<div style="display: none;"></div>`;
-        }
-
-        const data = this.structuredData || {
-            summary: [],
-            topic: { header: '', bullets: [] },
-            actions: [],
-        };
-
-        const hasAnyContent = data.summary.length > 0 || data.topic.bullets.length > 0 || data.actions.length > 0;
-
-        return html`
-            <div class="insights-container">
-                ${!hasAnyContent
-                    ? html`<div class="empty-state">No insights yet...</div>`
-                    : html`
-                        <insights-title>Current Summary</insights-title>
-                        ${data.summary.length > 0
-                            ? data.summary
-                                  .slice(0, 5)
-                                  .map(
-                                      (bullet, index) => html`
-                                          <div
-                                              class="markdown-content"
-                                              data-markdown-id="summary-${index}"
-                                              data-original-text="${bullet}"
-                                              @click=${() => this.handleMarkdownClick(bullet)}
-                                          >
-                                              ${bullet}
-                                          </div>
-                                      `
-                                  )
-                            : html` <div class="request-item">No content yet...</div> `}
-                        ${data.topic.header
-                            ? html`
-                                  <insights-title>${data.topic.header}</insights-title>
-                                  ${data.topic.bullets
-                                      .slice(0, 3)
-                                      .map(
-                                          (bullet, index) => html`
-                                              <div
-                                                  class="markdown-content"
-                                                  data-markdown-id="topic-${index}"
-                                                  data-original-text="${bullet}"
-                                                  @click=${() => this.handleMarkdownClick(bullet)}
-                                              >
-                                                  ${bullet}
-                                              </div>
-                                          `
-                                      )}
-                              `
-                            : ''}
-                        ${data.actions.length > 0
-                            ? html`
-                                  <insights-title>Actions</insights-title>
-                                  ${data.actions
-                                      .slice(0, 5)
-                                      .map(
-                                          (action, index) => html`
-                                              <div
-                                                  class="markdown-content"
-                                                  data-markdown-id="action-${index}"
-                                                  data-original-text="${action}"
-                                                  @click=${() => this.handleMarkdownClick(action)}
-                                              >
-                                                  ${action}
-                                              </div>
-                                          `
-                                      )}
-                              `
-                            : ''}
-                        ${this.hasCompletedRecording && data.followUps && data.followUps.length > 0
-                            ? html`
-                                  <insights-title>Follow-Ups</insights-title>
-                                  ${data.followUps.map(
-                                      (followUp, index) => html`
-                                          <div
-                                              class="markdown-content"
-                                              data-markdown-id="followup-${index}"
-                                              data-original-text="${followUp}"
-                                              @click=${() => this.handleMarkdownClick(followUp)}
-                                          >
-                                              ${followUp}
-                                          </div>
-                                      `
-                                  )}
-                              `
-                            : ''}
-                    `}
-            </div>
-        `;
+        if (!this.isVisible) return html``;
+        return html`<div class="text-size-toolbar"><response-font-controls></response-font-controls></div>
+            ${this.requestError ? html`<p role="alert" style="color:#fca5a5;font-size:12px">${this.requestError}</p>` : ''}
+            <conversation-feed @feed-question=${event => this.handleRequestClick(event.detail.text, event.detail.sessionId)} .completed=${this.hasCompletedRecording} kind="insights" .page=${this.feedPage}></conversation-feed>`;
     }
 }
 
-customElements.define('summary-view', SummaryView); 
+customElements.define('summary-view', SummaryView);

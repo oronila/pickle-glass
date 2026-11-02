@@ -16,6 +16,30 @@ const encryptionService = require('../features/common/services/encryptionService
 module.exports = {
   // Renderer로부터의 요청을 수신하고 서비스로 전달
   initialize() {
+    // Local interview profiles are deliberately separate from cloud preset CRUD.
+    const interviewSources = require('../features/common/services/interviewSourceService');
+    const path = require('node:path');
+    const { fileURLToPath } = require('node:url');
+    const interviewHandler = (channel, fn) => ipcMain.handle(channel, async (event, ...args) => {
+      try {
+        const senderUrl = new URL(event.senderFrame.url);
+        const appUI = path.resolve(__dirname, '../ui');
+        if (senderUrl.protocol !== 'file:' || !fileURLToPath(senderUrl).startsWith(appUI + path.sep)) throw new Error('Interview controls require the local application window.');
+        return { success: true, data: await fn(...args) };
+      } catch (error) { return { success: false, error: error.message }; }
+    });
+    interviewHandler('interview:open', async () => { await require('../features/common/services/interviewWindow').open(); return true; });
+    const interviewActions = require('../features/common/services/interviewActions');
+    for (const action of ['list', 'save', 'select', 'preview', 'remove', 'fetch-jd', 'start', 'stop']) {
+      interviewHandler(`interview:${action}`, payload => interviewActions.run(action, payload));
+    }
+    interviewHandler('interview:import', async () => {
+      const owner = authService.getCurrentUserId();
+      const selection = await require('electron').dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Interview source', extensions: ['docx', 'txt', 'md', 'pdf'] }] });
+      if (owner !== authService.getCurrentUserId()) throw new Error('User changed. Import cancelled.');
+      return selection.canceled ? null : interviewSources.importFile(selection.filePaths[0]);
+    });
+
     // Settings Service
     ipcMain.handle('settings:getPresets', async () => await settingsService.getPresets());
     ipcMain.handle('settings:get-auto-update', async () => await settingsService.getAutoUpdateSetting());
@@ -37,6 +61,7 @@ module.exports = {
     ipcMain.handle('shortcut:toggleAllWindowsVisibility', async () => await shortcutsService.toggleAllWindowsVisibility());
 
     // Permissions
+    interviewHandler('permission:restart', () => permissionService.restartApplication());
     ipcMain.handle('check-system-permissions', async () => await permissionService.checkSystemPermissions());
     ipcMain.handle('request-microphone-permission', async () => await permissionService.requestMicrophonePermission());
     ipcMain.handle('open-system-preferences', async (event, section) => await permissionService.openSystemPreferences(section));
@@ -79,11 +104,39 @@ module.exports = {
     ipcMain.handle('ollama:shutdown', async (event, force = false) => await ollamaService.handleShutdown(force));
 
     // Ask
+    const validateFeedSession = async id => {
+        if (!id) return null;
+        const sessions = await require('../features/common/repositories/session').getAllByUserId();
+        if (!sessions.some(session => session.id === id)) throw new Error('Session not found.');
+        return id;
+    };
+    ipcMain.handle('feed:listSessions', () => require('../features/common/repositories/session').getAllByUserId());
+    ipcMain.handle('ask:getFeed', async (event, before, sessionId) => askService.getFeed(before, await validateFeedSession(sessionId)));
+    ipcMain.handle('insights:getFeed', async (event, before, sessionId) => listenService.summaryService.getFeed(before, await validateFeedSession(sessionId)));
+    ipcMain.handle('insights:getCadence', () => require('../features/listen/summary/insightSettings').get());
+    ipcMain.handle('insights:setCadence', (event, value) => listenService.summaryService.configureCadence(value));
+    ipcMain.handle('ask:getAttachments', () => askService.getAttachmentState());
+    ipcMain.handle('ask:removeAttachment', (event, id) => askService.removeAttachment(id));
+    ipcMain.handle('ask:clearDraftAttachments', () => askService.clearDraftAttachments());
     ipcMain.handle('ask:sendQuestionFromAsk', async (event, userPrompt) => await askService.sendMessage(userPrompt));
-    ipcMain.handle('ask:sendQuestionFromSummary', async (event, userPrompt) => await askService.sendMessage(userPrompt));
+    ipcMain.handle('ask:sendQuestionFromSummary', async (event, userPrompt, sessionId) => {
+      if (!sessionId) throw new Error('Select an insight session before asking about it.');
+      await validateFeedSession(sessionId);
+      return askService.sendMessageForSession(userPrompt, sessionId);
+    });
     ipcMain.handle('ask:toggleAskButton', async () => await askService.toggleAskButton());
     ipcMain.handle('ask:closeAskWindow',  async () => await askService.closeAskWindow());
     
+    // Insights controls never start or stop capture.
+    ipcMain.handle('insights:getState', () => listenService.summaryService.getState());
+    ipcMain.handle('insights:analyze', async (event, scope) => {
+      return listenService.analyzeInsights(scope);
+    });
+    ipcMain.handle('insights:setScreen', (event, enabled) => listenService.summaryService.setScreenEnabled(enabled));
+    ipcMain.handle('insights:setAuto', (event, enabled) => listenService.summaryService.setAutoEnabled(enabled));
+    ipcMain.handle('insights:setVisible', (event, visible) => listenService.setInsightsVisibility(visible));
+    ipcMain.handle('insights:refresh', () => listenService.analyzeInsights('entire', { show: true }));
+
     // Listen
     ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) => await listenService.handleSendMicAudioContent(data, mimeType));
     ipcMain.handle('listen:sendSystemAudio', async (event, { data, mimeType }) => {

@@ -1,4 +1,13 @@
 const LATEST_SCHEMA = {
+    interview_profiles: { columns: [
+        { name: 'id', type: 'TEXT PRIMARY KEY' }, { name: 'uid', type: 'TEXT NOT NULL' },
+        { name: 'revision', type: 'INTEGER NOT NULL' }, { name: 'profile_json', type: 'TEXT NOT NULL' }, { name: 'updated_at', type: 'INTEGER NOT NULL' }
+    ] },
+    interview_selection: { columns: [{ name: 'uid', type: 'TEXT PRIMARY KEY' }, { name: 'profile_id', type: 'TEXT' }] },
+    interview_session_context: { columns: [
+        { name: 'session_id', type: 'TEXT PRIMARY KEY' }, { name: 'uid', type: 'TEXT NOT NULL' },
+        { name: 'profile_id', type: 'TEXT NOT NULL' }, { name: 'snapshot_json', type: 'TEXT' }, { name: 'invalid', type: 'INTEGER NOT NULL DEFAULT 0' }
+    ] },
     users: {
         columns: [
             { name: 'uid', type: 'TEXT PRIMARY KEY' },
@@ -45,6 +54,15 @@ const LATEST_SCHEMA = {
             { name: 'model', type: 'TEXT' },
             { name: 'created_at', type: 'INTEGER' },
             { name: 'sync_state', type: 'TEXT DEFAULT \'clean\'' }
+        ]
+    },
+    feed_entries: {
+        columns: [
+            { name: 'id', type: 'TEXT PRIMARY KEY' },
+            { name: 'session_id', type: 'TEXT NOT NULL' },
+            { name: 'kind', type: 'TEXT NOT NULL' },
+            { name: 'timestamp', type: 'INTEGER NOT NULL' },
+            { name: 'data_json', type: 'TEXT NOT NULL' }
         ]
     },
     summaries: {
